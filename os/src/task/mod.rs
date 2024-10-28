@@ -17,6 +17,7 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::syscall::{self, TaskInfo};
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -43,6 +44,8 @@ pub struct TaskManager {
 pub struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
+    /// task info list
+    tasks_infos: [TaskInfo; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
 }
@@ -59,11 +62,13 @@ lazy_static! {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
+        let mut task_infos = [TaskInfo::new(); MAX_APP_NUM];
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
+                    tasks_infos,
                     current_task: 0,
                 })
             },
@@ -135,6 +140,26 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Add syscall count
+    fn add_syscall_count(&self, syscall_id: uszie) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks_infos[current].add_syscall_count(syscall_id);
+    }
+
+    /// Copy current task info
+    /// Status and syscall count and task start time included
+    /// Time need handle after in sys_task_info
+    fn task_info_dump(&self, task_info: *mut TaskInfo) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let status = inner.tasks[current].task_status;
+        unsafe { 
+            *task_info = inner.tasks_infos[current]; 
+            (*task_info).status = status;
+        }
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +193,14 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Add current task's syscall count
+pub fn add_syscall_cnt(syscall_id: usize) {
+    TASK_MANAGER.add_syscall_count(syscall_id);
+}
+
+/// Return current task's info
+pub fn current_task_info(task_info:*mut TaskInfo) {
+    TASK_MANAGER.task_info_dump(task_info);
 }
