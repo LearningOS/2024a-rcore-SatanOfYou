@@ -14,10 +14,11 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
-use crate::config::MAX_APP_NUM;
+use crate::config::{MAX_APP_NUM, SYSCALL_CNT};
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
-use crate::syscall::{self, TaskInfo};
+use crate::timer::get_time_ms;
+use crate::syscall::{TaskInfo, SYSCALL_EXIT, SYSCALL_GET_TIME, SYSCALL_TASK_INFO, SYSCALL_WRITE, SYSCALL_YIELD };
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -44,8 +45,6 @@ pub struct TaskManager {
 pub struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
-    /// task info list
-    tasks_infos: [TaskInfo; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
 }
@@ -57,18 +56,18 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_cnt: [0; SYSCALL_CNT],
+            start_time: 0,
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
-        let mut task_infos = [TaskInfo::new(); MAX_APP_NUM];
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
-                    tasks_infos,
                     current_task: 0,
                 })
             },
@@ -85,6 +84,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
+        task0.start_time = get_time_ms();
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -127,6 +127,10 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            // update start time
+            if inner.tasks[next].start_time == 0 {
+                inner.tasks[next].start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -141,23 +145,28 @@ impl TaskManager {
         }
     }
 
-    /// Add syscall count
-    fn add_syscall_count(&self, syscall_id: uszie) {
+    /// Add syscall count, idx in 0..5
+    fn add_syscall_count(&self, syscall_idx: usize) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.tasks_infos[current].add_syscall_count(syscall_id);
+        inner.tasks[current].syscall_cnt[syscall_idx] += 1;
     }
 
     /// Copy current task info
     /// Status and syscall count and task start time included
     /// Time need handle after in sys_task_info
+    /// current time = start time
     fn task_info_dump(&self, task_info: *mut TaskInfo) {
-        let mut inner = self.inner.exclusive_access();
+        let inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let status = inner.tasks[current].task_status;
-        unsafe { 
-            *task_info = inner.tasks_infos[current]; 
+        unsafe {
+            let arr = [SYSCALL_WRITE, SYSCALL_EXIT, SYSCALL_YIELD, SYSCALL_GET_TIME, SYSCALL_TASK_INFO];
+            for i in 0..SYSCALL_CNT {
+                (*task_info).syscall_times[arr[i]] = inner.tasks[current].syscall_cnt[i];
+            }
             (*task_info).status = status;
+            (*task_info).time = inner.tasks[current].start_time;
         }
     }
 }
@@ -196,8 +205,8 @@ pub fn exit_current_and_run_next() {
 }
 
 /// Add current task's syscall count
-pub fn add_syscall_cnt(syscall_id: usize) {
-    TASK_MANAGER.add_syscall_count(syscall_id);
+pub fn add_syscall_cnt(syscall_idx: usize) {
+    TASK_MANAGER.add_syscall_count(syscall_idx);
 }
 
 /// Return current task's info

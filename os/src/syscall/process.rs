@@ -2,7 +2,7 @@
 use crate::{
     config::MAX_SYSCALL_NUM,
     task::{exit_current_and_run_next, suspend_current_and_run_next, TaskStatus, current_task_info},
-    timer::get_time_us,
+    timer::{get_time_us, get_time_ms}
 };
 
 #[repr(C)]
@@ -18,26 +18,12 @@ pub struct TaskInfo {
     /// Task status in it's life cycle
     pub status: TaskStatus,
     /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
     /// Total running time of task
-    time: usize,
+    pub time: usize,
 }
 
-impl TaskInfo {
-    pub fn new() -> Self {
-        let mut time_now = TimeVal{sec: 0, usec: 0};
 
-        sys_get_time(&mut time_now, tz);
-        TaskInfo {
-            status: TaskStatus::Ready,
-            syscall_times: [0; MAX_SYSCALL_NUM],
-            time: time_now.sec * 1_000_000 + time_now.usec,
-        }
-    }
-    pub fn add_syscall_count(&self, syscall_id: uszie) {
-        self.syscall_times[syscall_id] += 1;
-    }
-}
 
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -70,7 +56,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     trace!("kernel: sys_task_info");
     current_task_info(_ti);
-    let us = get_time_us();
+    let us = get_time_ms();
     unsafe {
         (*_ti).time = us - (*_ti).time;
     }
