@@ -14,14 +14,17 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
+use crate::syscall::{TaskInfo, SYSCALL_EXIT, SYSCALL_GET_TIME, SYSCALL_MMAP, SYSCALL_MUNMAP, SYSCALL_SBRK, SYSCALL_TASK_INFO, SYSCALL_WRITE, SYSCALL_YIELD};
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+use crate::mm::{MapPermission, PageTable, VirtAddr, VirtPageNum};
 pub use context::TaskContext;
 
 /// The task manager, where all the tasks are managed.
@@ -79,6 +82,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.start_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -140,6 +144,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].start_time == 0 {
+                inner.tasks[next].start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -152,6 +159,88 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+
+    /// Add syscall times
+    fn add_syscall_times(&self, syscall_idx: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_idx] += 1;
+    }
+
+    /// dump current task info
+    fn dump_info(&self, task: &mut TaskInfo) {
+        let inner = self.inner.exclusive_access();
+        let syscall_arr = [SYSCALL_WRITE, SYSCALL_EXIT, SYSCALL_YIELD, SYSCALL_GET_TIME, SYSCALL_SBRK, SYSCALL_MUNMAP, SYSCALL_MMAP, SYSCALL_TASK_INFO];
+        let current = inner.current_task;
+        task.time = get_time_ms() - inner.tasks[current].start_time;
+        for i in 0..syscall_arr.len() {
+            task.syscall_times[syscall_arr[i]] = inner.tasks[current].syscall_times[i];
+        }
+        task.status = inner.tasks[current].task_status;
+    }
+
+    /// map area in current task's pagetable
+    fn map_area(&self, _start: usize, len: usize, _port: usize) -> isize{
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let len = ((len - 1 + PAGE_SIZE) / PAGE_SIZE) << PAGE_SIZE_BITS;
+        let mut permission = MapPermission::U;
+        if _port & 0x1 != 0 {
+            permission = (permission) | MapPermission::R;
+        }
+        if _port & 0x2 != 0 {
+            permission = (permission) | MapPermission::W;
+        }
+        if _port & 0x4 != 0 {
+            permission = (permission) | MapPermission::X;
+        }
+        let page_table = PageTable::from_token(inner.tasks[current].get_user_token());
+        let mut cnt = 0;
+        loop {
+            if cnt >= len {
+                break;
+            }
+            let pte = page_table.find_pte(VirtAddr(_start + cnt).into());
+            if pte.is_some() && pte.unwrap().is_valid() {
+                println!("map length 0x{:x} at address 0x{:x} remap, return -1", len, _start + cnt);
+                return -1;
+            }
+            cnt += PAGE_SIZE;
+        }
+        drop(page_table);
+        inner.tasks[current].memory_set.insert_framed_area(_start.into(), (_start + len).into(), permission);
+        println!("map virtual address from 0x{:x} to 0x{:x}", _start, _start + len);
+        0
+    }
+
+    /// unmap area in current task's pagetable
+    fn unmap_area(&self, _start: usize, len: usize) -> isize{
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let len = ((len - 1 + PAGE_SIZE) / PAGE_SIZE) << PAGE_SIZE_BITS;
+        let mut page_table = PageTable::from_token(inner.tasks[current].get_user_token());
+        let mut cnt = 0;
+        loop {
+            if cnt >= len {
+                break;
+            }
+            if page_table.find_pte(VirtAddr(_start + cnt).into()).is_none() {
+                println!("address 0x{:x} not map, return -1", _start + cnt);
+                return -1;
+            }
+            cnt += PAGE_SIZE;
+        }
+        let virt_page: VirtPageNum = VirtAddr(_start).into();
+        let virt_end: VirtPageNum = VirtAddr(_start + len).into();
+        // page_table.unmap(VirtAddr(_start + cnt).into());
+        for area in &mut inner.tasks[current].memory_set.areas {
+            if virt_page == area.vpn_range.get_start() && virt_end == area.vpn_range.get_end() {
+                area.unmap(&mut page_table);
+                return 0;
+            }
+        }
+        -1
     }
 }
 
@@ -201,4 +290,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Add syscall times
+pub fn add_syscall_time(syscall_idx: usize) {
+    TASK_MANAGER.add_syscall_times(syscall_idx);
+}
+
+/// Dump current task info 
+pub fn dump_task_info(task: &mut TaskInfo) {
+    TASK_MANAGER.dump_info(task);
+}
+
+/// map area for current task
+pub fn map_current_task(_start: usize, len: usize, _port: usize) -> isize{
+    TASK_MANAGER.map_area(_start, len, _port)
+}
+
+/// unmap area for current task
+pub fn unmap_current_task(_start: usize, len: usize) -> isize{
+    TASK_MANAGER.unmap_area(_start, len)
 }
