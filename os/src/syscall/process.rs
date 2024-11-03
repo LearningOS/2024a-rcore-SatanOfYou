@@ -4,11 +4,11 @@ use alloc::sync::Arc;
 use crate::{
     config::MAX_SYSCALL_NUM,
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_refmut, translated_str, VirtAddr},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, TaskStatus,
+        add_task, current_task, current_user_token, exit_current_and_run_next, map_current_task, set_current_task_priority, suspend_current_and_run_next, unmap_current_task, TaskStatus
     },
+    timer::get_time_us
 };
 
 #[repr(C)]
@@ -39,6 +39,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 /// current task gives up resources for other tasks
 pub fn sys_yield() -> isize {
     trace!("kernel:pid[{}] sys_yield", current_task().unwrap().pid.0);
+    // println!("kernel:pid[{}] sys_yield", current_task().unwrap().pid.0);
     suspend_current_and_run_next();
     0
 }
@@ -122,7 +123,31 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let buffers = translated_byte_buffer(
+        current_user_token(), 
+        _ts as *const u8, 
+        core::mem::size_of::<TimeVal>()
+    );
+    let time_now= get_time_us();
+    let temp = TimeVal {
+        sec: time_now / 1_000_000,
+        usec: time_now % 1_000_000,
+    };
+    unsafe {
+        let src = core::slice::from_raw_parts(
+            &temp as *const TimeVal as *const u8,
+             core::mem::size_of::<TimeVal>()
+        );
+
+        let mut count = 0;
+        for buffer in buffers {
+            for j in 0..buffer.len() {
+                buffer[j] = src[count];
+                count += 1;
+            }
+        }
+    }
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
@@ -133,6 +158,7 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
         "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
+    println!("--------task sys_task_info enter--------");
     -1
 }
 
@@ -142,7 +168,11 @@ pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let va: VirtAddr = _start.into();
+    if va.page_offset() != 0 ||(_port & !0x7 != 0) || (_port & 0x7 == 0){
+        return -1;
+    }
+    map_current_task(_start, _len, _port)
 }
 
 /// YOUR JOB: Implement munmap.
@@ -151,7 +181,11 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let va: VirtAddr = _start.into();
+    if va.page_offset() != 0 {
+        return -1;
+    }
+    unmap_current_task(_start, _len)
 }
 
 /// change data segment size
@@ -166,12 +200,28 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let current_task = current_task().unwrap();
+        let new_task = current_task.spawn(data);
+        let new_pid = new_task.pid.0;
+        // modify trap context of new_task, because it returns immediately after switching
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+        trap_cx.x[10] = 0;
+        // add new task to scheduler
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
@@ -180,5 +230,10 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    println!("---set priority {} for pid: {}---", _prio, current_task().unwrap().pid.0);
+    if _prio <= 1 {
+        return -1;
+    }
+    set_current_task_priority(_prio as usize);
+    _prio
 }

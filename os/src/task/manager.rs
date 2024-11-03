@@ -23,6 +23,15 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
+        // let min_index = self.ready_queue.iter().enumerate()
+        //     .min_by_key(|(_, task)| task.inner_exclusive_access().stride)
+        //     .map(|(index, _)| index)?;
+        // if let Some(task) = self.ready_queue.get(min_index) {
+        //     let mut inner = task.inner_exclusive_access();
+        //     inner.stride += usize::MAX / inner.prio;
+        //     println!("fetch task pid = {}", task.getpid())
+        // }
+        // self.ready_queue.remove(min_index)
         self.ready_queue.pop_front()
     }
 }
