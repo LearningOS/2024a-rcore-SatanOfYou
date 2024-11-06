@@ -138,15 +138,15 @@ pub fn unlink_file(path: &str) -> isize {
         // println!("unlink find file");
         let block_idx = inode_path.block_id;
         let offset = inode_path.block_offset;
-        let (res, nlink) = ROOT_INODE.unlink(path, block_idx, offset);
+        let (res, _nlink) = ROOT_INODE.unlink(path, block_idx, offset);
         println!("unlink clear direntry");
-        if nlink == 1 {
-            inode_path.clear();
-            // 回收 inode，后面会自己clear
-            println!("unlink clear file content");
-        }else {
-            println!("unlink don't need to clear file content");
-        }
+        // if nlink == 1 {
+        //     inode_path.clear();
+        //     // 回收 inode，后面会自己clear
+        //     println!("unlink clear file content");
+        // }else {
+        //     println!("unlink don't need to clear file content");
+        // }
         res
     }else {
         -1
