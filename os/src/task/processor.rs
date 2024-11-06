@@ -9,6 +9,8 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::mm::{MapPermission, PageTable, VirtAddr, VirtPageNum};
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -43,6 +45,72 @@ impl Processor {
     ///Get current task in cloning semanteme
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
+    }
+
+    /// Map area to current task
+    fn map_area(&mut self, _start: usize, len: usize, _port: usize) -> isize{
+        let mut inner = self.current.as_mut().unwrap().inner_exclusive_access();
+        let len = ((len - 1 + PAGE_SIZE) / PAGE_SIZE) << PAGE_SIZE_BITS;
+        let mut permission = MapPermission::U;
+        if _port & 0x1 != 0 {
+            permission = (permission) | MapPermission::R;
+        }
+        if _port & 0x2 != 0 {
+            permission = (permission) | MapPermission::W;
+        }
+        if _port & 0x4 != 0 {
+            permission = (permission) | MapPermission::X;
+        }
+        let page_table = PageTable::from_token(inner.get_user_token());
+        let mut cnt = 0;
+        loop {
+            if cnt >= len {
+                break;
+            }
+            let pte = page_table.find_pte(VirtAddr(_start + cnt).into());
+            if pte.is_some() && pte.unwrap().is_valid() {
+                println!("map length 0x{:x} at address 0x{:x} remap, return -1", len, _start + cnt);
+                return -1;
+            }
+            cnt += PAGE_SIZE;
+        }
+        drop(page_table);
+        inner.memory_set.insert_framed_area(_start.into(), (_start + len).into(), permission);
+        0
+    }
+
+    /// unmap area in current task's pagetable
+    fn unmap_area(&mut self, _start: usize, len: usize) -> isize{
+        let mut inner = self.current.as_mut().unwrap().inner_exclusive_access();
+        let len = ((len - 1 + PAGE_SIZE) / PAGE_SIZE) << PAGE_SIZE_BITS;
+        let mut page_table = PageTable::from_token(inner.get_user_token());
+        let mut cnt = 0;
+        loop {
+            if cnt >= len {
+                break;
+            }
+            if page_table.find_pte(VirtAddr(_start + cnt).into()).is_none() {
+                println!("address 0x{:x} not map, return -1", _start + cnt);
+                return -1;
+            }
+            cnt += PAGE_SIZE;
+        }
+        let virt_page: VirtPageNum = VirtAddr(_start).into();
+        let virt_end: VirtPageNum = VirtAddr(_start + len).into();
+        // page_table.unmap(VirtAddr(_start + cnt).into());
+        for area in &mut inner.memory_set.areas {
+            if virt_page == area.vpn_range.get_start() && virt_end == area.vpn_range.get_end() {
+                area.unmap(&mut page_table);
+                return 0;
+            }
+        }
+        -1
+    }
+
+    /// set priority
+    fn set_prio(&mut self, _prio: usize) {
+        let mut inner = self.current.as_mut().unwrap().inner_exclusive_access();
+        inner.prio = _prio;
     }
 }
 
@@ -108,4 +176,19 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+/// map area for current task
+pub fn map_current_task(_start: usize, len: usize, _port: usize) -> isize{
+    PROCESSOR.exclusive_access().map_area(_start, len, _port)
+}
+
+/// unmap area for current task
+pub fn unmap_current_task(_start: usize, len: usize) -> isize{
+    PROCESSOR.exclusive_access().unmap_area(_start, len)
+}
+
+/// Set current task's priority
+pub fn set_current_task_priority(_prio: usize){
+    PROCESSOR.exclusive_access().set_prio(_prio)
 }

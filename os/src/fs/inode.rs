@@ -102,6 +102,7 @@ impl OpenFlags {
 
 /// Open a file
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
+    // println!("enter open file");
     let (readable, writable) = flags.read_write();
     if flags.contains(OpenFlags::CREATE) {
         if let Some(inode) = ROOT_INODE.find(name) {
@@ -115,15 +116,44 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
                 .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
         }
     } else {
+        // println!("open file, flag don't contain CREATE flag");
         ROOT_INODE.find(name).map(|inode| {
             if flags.contains(OpenFlags::TRUNC) {
                 inode.clear();
             }
+            // println!("find file inode!");
             Arc::new(OSInode::new(readable, writable, inode))
         })
     }
 }
 
+/// Link a file
+pub fn link_file(old_path: &str, new_path: &str) -> isize {
+    ROOT_INODE.link(old_path, new_path)
+}
+
+/// Unlink a file
+pub fn unlink_file(path: &str) -> isize {
+    if let Some(inode_path) = ROOT_INODE.find(path) {
+        // println!("unlink find file");
+        let block_idx = inode_path.block_id;
+        let offset = inode_path.block_offset;
+        let (res, nlink) = ROOT_INODE.unlink(path, block_idx, offset);
+        println!("unlink clear direntry");
+        if nlink == 1 {
+            inode_path.clear();
+            // 回收 inode，后面会自己clear
+            println!("unlink clear file content");
+        }else {
+            println!("unlink don't need to clear file content");
+        }
+        res
+    }else {
+        -1
+    }
+
+    // ROOT_INODE.unlink(path)
+}
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
@@ -154,5 +184,26 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn ino(&self) -> u64 {
+        let inner = self.inner.exclusive_access();
+        let block_id = inner.inode.block_id;
+        let offset = inner.inode.block_offset;
+        let res = inner.inode.fs.lock().get_inode_id(block_id, offset) as u64;
+        drop(inner);
+        res
+    }
+
+    fn is_inode_is_dir(&self) -> (bool, bool) {
+        (true, self.inner.exclusive_access().inode.is_dir())
+    }
+
+    fn nlink(&self) -> u32 {
+        let inner = self.inner.exclusive_access();
+        let block_id = inner.inode.block_id;
+        let offset = inner.inode.block_offset;
+        let res = inner.inode.fs.lock().get_inode_id(block_id, offset);
+        drop(inner);
+        ROOT_INODE.inode_idx_nlink(res) as u32
     }
 }
