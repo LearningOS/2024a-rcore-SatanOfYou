@@ -1,14 +1,20 @@
 # ch6 实验实现总结
-1：sys_spawn 根据 sys_exec 和 sys_fork 的具体实现参考结合即可。
+1：linkat 的实现很简单，只需要判断原文件是否存在。存在拿到它的 inode index，然后在ROOT inode 下多写入一个DIRENTRY，名字是新文件名，inode号就是旧文件的 inode index。
 
-2：sys_set_priority 设置优先级。
-这里有一个很大的问题：
-进程的 stride 初始值为 0，类型为 usize， priority 设置初始值为 16。每次更新内容为 usize::MAX / task.priority。
-一般情况下，priority 设置在 15 左右。测试中有设置 priority 很大的情况，只是个例，很快调度执行完毕。
+2：unlinkat 的实现比较难，目前的实现是：直接判断文件是否存在，存在，那么就直接在ROOT inode下清除它的 DIRENTRY内容。清除之后从后向前把DIRENTRY覆盖过去。然后设置 disk inode的大小减去DIRENTRY的size。只是找不到文件了现在。
 
-问题：在常规任务调度中，任务调度几次之后，就开始重复调度任务 0：initproc。
-主要原因在于：task 0 最先调度，其 stride 会先增加到临界值。而大家的priority 默认值都是 16。导致每次增加的 stride 都很大且每一步都一样。
-    那么，当其余任务调度之后，导致其 stride 大于 task 0 的 stride。当大家stride相等时，调度最后一个任务。
-    任务调度到一段时间之后，开始溢出，则必定会有两个任务保持不动，另外一个反复调度。
+这时候，其实没考虑ROOT inode的datablock的回收。因为如果DIRENTRY在一个datablock的边界位置，那只是清除了它的内容。
 
-解决办法：每次更新stride进行取余操作。具体可以看 os-output.txt
+在注释内容里还实现了目标文件的file inode的clear函数调用，回收所有的data block以及涉及到的inode中indirect部分的datablock。但是这时候没回收文件申请的inode。
+
+但是一个可能好的实现：回收掉该文件的inode，因为申请新建文件的时候，申请inode会调用它的clear，也就是旧文件的内容，新文件来打扫。不需要在unlink的时候调用clear。
+
+3：stat的实现：给 File这个trait添加了ino，is_inode_is_dir，nlink等方法，获取所需的信息，然后直接拷贝到用户空间。但这种做法不具有扩展性。不太好
+
+# 问答作业
+## 在我们的easy-fs中，root inode起着什么作用？如果root inode中的内容损坏了，会发生什么？
+
+ROOT inode 起最重要的作用，所有文件只有一级，都位于ROOT inode下。在Linux文件结构中，它代表 / 所在的inode。
+
+如果 ROOT inode内容损坏，会导致所有的文件不能正确读写，找不到正确的文件内容。文件系统全部崩溃。
+
