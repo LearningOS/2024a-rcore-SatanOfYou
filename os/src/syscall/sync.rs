@@ -35,10 +35,10 @@ pub fn sys_mutex_create(blocking: bool) -> isize {
             .tid
     );
     let process = current_process();
-    let mutex: Option<Arc<dyn Mutex>> = if !blocking {
-        Some(Arc::new(MutexSpin::new()))
+    let mutex: Option<(usize, Arc<dyn Mutex>)> = if !blocking {
+        Some((usize::MAX, Arc::new(MutexSpin::new())))
     } else {
-        Some(Arc::new(MutexBlocking::new()))
+        Some((usize::MAX, Arc::new(MutexBlocking::new())))
     };
     let mut process_inner = process.inner_exclusive_access();
     if let Some(id) = process_inner
@@ -70,10 +70,28 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
     );
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
-    let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+    let task_id = process_inner.mutex_list[mutex_id].as_ref().unwrap().0;
+    let tid = current_task()
+    .unwrap()
+    .inner_exclusive_access()
+    .res
+    .as_ref()
+    .unwrap()
+    .tid;
+    if tid == task_id && process_inner.dead_detected {
+        drop(process_inner);
+        drop(process);
+        return -0xDEAD ;
+    }
+    let mutex = Arc::clone(&process_inner.mutex_list[mutex_id].as_ref().unwrap().1);
     drop(process_inner);
     drop(process);
     mutex.lock();
+    let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.mutex_list[mutex_id].as_mut().unwrap().0 = tid;
+    drop(process_inner);
+    drop(process);
     0
 }
 /// mutex unlock syscall
@@ -90,8 +108,9 @@ pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
             .tid
     );
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+    let mut process_inner = process.inner_exclusive_access();
+    let mutex = Arc::clone(&process_inner.mutex_list[mutex_id].as_ref().unwrap().1);
+    process_inner.mutex_list[mutex_id].as_mut().unwrap().0 = usize::MAX;
     drop(process_inner);
     drop(process);
     mutex.unlock();
@@ -237,7 +256,7 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
     let condvar = Arc::clone(process_inner.condvar_list[condvar_id].as_ref().unwrap());
-    let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+    let mutex = Arc::clone(&process_inner.mutex_list[mutex_id].as_ref().unwrap().1);
     drop(process_inner);
     condvar.wait(mutex);
     0
@@ -247,5 +266,8 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 /// YOUR JOB: Implement deadlock detection, but might not all in this syscall
 pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
     trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+    if _enabled == 1{
+        current_process().inner_exclusive_access().dead_detected = true;
+    }
+    0
 }
