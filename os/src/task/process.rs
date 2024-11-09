@@ -51,6 +51,10 @@ pub struct ProcessControlBlockInner {
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
     /// dead detected
     pub dead_detected: bool,
+    /// sem need
+    pub sem_need: Vec<Vec<i32>>,
+    /// finished 
+    pub finished: Vec<bool>,
 }
 
 impl ProcessControlBlockInner {
@@ -122,6 +126,8 @@ impl ProcessControlBlock {
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
                     dead_detected: false,
+                    sem_need: Vec::new(),
+                    finished: Vec::new(),
                 })
             },
         });
@@ -249,6 +255,8 @@ impl ProcessControlBlock {
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
                     dead_detected: false,
+                    sem_need: Vec::new(),
+                    finished: Vec::new(),
                 })
             },
         });

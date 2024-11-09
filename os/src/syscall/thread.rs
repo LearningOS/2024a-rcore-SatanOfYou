@@ -4,6 +4,7 @@ use crate::{
     trap::{trap_handler, TrapContext},
 };
 use alloc::sync::Arc;
+use alloc::vec;
 /// thread create syscall
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     trace!(
@@ -29,12 +30,22 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
             .ustack_base,
         true,
     ));
+    
     // add new task to scheduler
     add_task(Arc::clone(&new_task));
     let new_task_inner = new_task.inner_exclusive_access();
     let new_task_res = new_task_inner.res.as_ref().unwrap();
     let new_task_tid = new_task_res.tid;
     let mut process_inner = process.inner_exclusive_access();
+    
+    let sem_num = match process_inner.sem_need.is_empty() {
+        true => 0,
+        false => process_inner.sem_need[0].len(),
+    };
+    let zero_vec = vec![0; sem_num];
+    process_inner.sem_need.push(zero_vec.clone());
+    process_inner.finished.push(false);
+
     // add new thread to current process
     let tasks = &mut process_inner.tasks;
     while tasks.len() < new_task_tid + 1 {
